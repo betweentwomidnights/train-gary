@@ -1,0 +1,10 @@
+essentia-tensorflow
+numpy
+librosa
+tqdm
+numba
+dora-search
+descript-audio-codec
+protobuf
+audiocraft
+requests
