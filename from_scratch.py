@@ -9,6 +9,7 @@ import requests
 from numba import cuda
 from pydub import AudioSegment
 import subprocess
+from pathlib import Path
 
 # Function to install system packages
 def install_system_packages():
@@ -49,6 +50,44 @@ def download_model_weights():
 # Call the function to download model weights
 download_model_weights()
 
+# Demucs configuration
+model = "htdemucs"
+extensions = ["mp3", "wav", "ogg", "flac"]
+two_stems = None
+mp3 = True
+mp3_rate = 320
+float32 = False
+int24 = False
+
+def find_files(in_path):
+    out = []
+    for file in Path(in_path).iterdir():
+        if file.suffix.lower().lstrip(".") in extensions:
+            out.append(file)
+    return out
+
+def separate(inp, outp):
+    cmd = ["python3", "-m", "demucs.separate", "-o", str(outp), "-n", model]
+    if mp3:
+        cmd += ["--mp3", f"--mp3-bitrate={mp3_rate}"]
+    if float32:
+        cmd += ["--float32"]
+    if int24:
+        cmd += ["--int24"]
+    if two_stems is not None:
+        cmd += [f"--two-stems={two_stems}"]
+    files = [str(f) for f in find_files(inp)]
+    if not files:
+        print(f"No valid audio files in {inp}")
+        return
+    print("Going to separate the files:")
+    print('\n'.join(files))
+    print("With command: ", " ".join(cmd))
+    p = subprocess.Popen(cmd + files, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p.wait()
+    if p.returncode != 0:
+        print("Command failed, something went wrong.")
+
 # Function to slice and resample audio files
 def slice_and_resample_audio(dataset_path, output_dir):
     os.makedirs(output_dir, exist_ok=True)
@@ -59,9 +98,7 @@ def slice_and_resample_audio(dataset_path, output_dir):
         if filename.endswith(('.mp3', '.wav', '.flac')):
             os.rename(os.path.join(dataset_path, filename), os.path.join(original_dir, filename))
             audio = AudioSegment.from_file(os.path.join(original_dir, filename))
-
             audio = audio.set_frame_rate(44100)
-
             for i in range(0, len(audio), 30000):
                 chunk = audio[i:i+30000]
                 chunk_filename = f"{os.path.splitext(filename)[0]}_chunk{i//1000}.wav"
@@ -69,10 +106,19 @@ def slice_and_resample_audio(dataset_path, output_dir):
 
     print("Audio files sliced and resampled successfully.")
 
-# Example usage of slice_and_resample_audio function
-dataset_path = "./dataset/gary"
-output_dir = "./dataset/gary/split"
-slice_and_resample_audio(dataset_path, output_dir)
+# Process the dataset
+def process_dataset(raw_audio_path, demucs_output_path, split_output_path):
+    # Perform demucs vocal separation
+    separate(raw_audio_path, demucs_output_path)
+    
+    # Perform slicing and resampling
+    slice_and_resample_audio(demucs_output_path, split_output_path)
+
+# Example usage
+raw_audio_path = "./dataset/gary"
+demucs_output_path = "./dataset/gary/demucs"
+split_output_path = "./dataset/gary/split"
+process_dataset(raw_audio_path, demucs_output_path, split_output_path)
 
 
 # @title metadata (labels) for essentia - LONG CELL DONT OPEN
@@ -626,26 +672,24 @@ def get_audio_features(audio_filename):
 
 # Autolabelling and creating train/test split
 print('Autolabelling...')
-dataset_path = "./dataset/gary/split"
-folder_to_save_dataset_in = "./dataset/gary"
+split_dataset_path = "./dataset/gary/split"
+output_dataset_path = "./dataset/gary"
 
-# This only works if we have audio filenames like 'artist_name_chunk_XX.wav'. We don't really need artist names in our prompts
-# and it's debatable whether a continuations model needs prompts. it will be fine-tuned and overfit to produce certain qualities from input audio.
 def extract_artist_from_filename(filename):
     match = re.search(r'(.+?)\s\d+_chunk\d+\.wav', filename)
     artist = match.group(1) if match else ""
     return artist.replace("mix", "").strip() if "mix" in artist else artist
 
-with open(os.path.join(folder_to_save_dataset_in, "train.jsonl"), "w") as train_file, \
-     open(os.path.join(folder_to_save_dataset_in, "test.jsonl"), "w") as eval_file:
-    dset = os.listdir(dataset_path)
+with open(os.path.join(output_dataset_path, "train.jsonl"), "w") as train_file, \
+     open(os.path.join(output_dataset_path, "test.jsonl"), "w") as eval_file:
+    dset = os.listdir(split_dataset_path)
     random.shuffle(dset)
     for filename in tqdm(dset):
         try:
-            result = get_audio_features(os.path.join(dataset_path, filename))
+            result = get_audio_features(os.path.join(split_dataset_path, filename))
         except:
             result = {"genres": [], "moods": [], "instruments": []}
-        y, sr = librosa.load(os.path.join(dataset_path, filename))
+        y, sr = librosa.load(os.path.join(split_dataset_path, filename))
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
         tempo = round(tempo)
         chroma = librosa.feature.chroma_stft(y=y, sr=sr)
@@ -667,7 +711,7 @@ with open(os.path.join(folder_to_save_dataset_in, "train.jsonl"), "w") as train_
             "name": "",
             "instrument": result.get('instruments', ""),
             "moods": result.get('moods', []),
-            "path": os.path.join(dataset_path, filename)
+            "path": os.path.join(split_dataset_path, filename)
         }
         if random.random() < 0.85:
             train_file.write(json.dumps(entry) + '\n')
@@ -679,7 +723,7 @@ device = cuda.get_current_device()
 device.reset()
 
 # Create YAML configuration file
-config_path = os.path.join(folder_to_save_dataset_in, "train.yaml")
+config_path = os.path.join(output_dataset_path, "train.yaml")
 package_str = "package"
 yaml_contents = f"""#@{package_str} __global__
 
