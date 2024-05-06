@@ -1,1 +1,6 @@
-
+build-essential
+libeigen3-dev
+libyaml-dev
+libfftw3-dev
+libtag1-dev
+libchromaprint-dev
