@@ -4,12 +4,17 @@ import json
 from tqdm import tqdm
 import librosa
 import numpy as np
+
 from essentia.standard import MonoLoader, TensorflowPredictEffnetDiscogs, TensorflowPredict2D
 import requests
 from numba import cuda
 from pydub import AudioSegment
 import subprocess
 from pathlib import Path
+import shutil
+
+import re
+
 
 # Function to install system packages
 def install_system_packages():
@@ -90,35 +95,84 @@ def separate(inp, outp):
 
 # Function to slice and resample audio files
 def slice_and_resample_audio(dataset_path, output_dir):
+    print(f"Slicing and resampling audio in {dataset_path}...")
     os.makedirs(output_dir, exist_ok=True)
-    original_dir = os.path.join(output_dir, "original")
-    os.makedirs(original_dir, exist_ok=True)
-
     for filename in os.listdir(dataset_path):
-        if filename.endswith(('.mp3', '.wav', '.flac')):
-            os.rename(os.path.join(dataset_path, filename), os.path.join(original_dir, filename))
-            audio = AudioSegment.from_file(os.path.join(original_dir, filename))
-            audio = audio.set_frame_rate(44100)
-            for i in range(0, len(audio), 30000):
-                chunk = audio[i:i+30000]
-                chunk_filename = f"{os.path.splitext(filename)[0]}_chunk{i//1000}.wav"
-                chunk.export(os.path.join(output_dir, chunk_filename), format="wav")
-
-    print("Audio files sliced and resampled successfully.")
+        if filename.endswith(".mp3"):
+            audio_path = os.path.join(dataset_path, filename)
+            if os.path.exists(audio_path):
+                audio = AudioSegment.from_file(audio_path)
+                audio = audio.set_frame_rate(44100)
+                for i in range(0, len(audio), 30000):
+                    chunk = audio[i:i+30000]
+                    chunk_filename = f"{os.path.splitext(filename)[0]}_chunk{i//1000}.wav"
+                    chunk.export(os.path.join(output_dir, chunk_filename), format="wav")
+                print(f"Processed {filename}")
+            else:
+                print(f"File {audio_path} not found")
+    print("All audio files processed.")
 
 # Process the dataset
-def process_dataset(raw_audio_path, demucs_output_path, split_output_path):
-    # Perform demucs vocal separation
-    separate(raw_audio_path, demucs_output_path)
+def process_demucs_output(demucs_output_path, instrumental_output_path):
+    print("Processing Demucs output...")
+    os.makedirs(instrumental_output_path, exist_ok=True)
+
+    # Traverse through the first level of folders created by Demucs
+    for folder in os.listdir(demucs_output_path):
+        # Construct the path to the first level folder (track folder)
+        first_level_folder_path = os.path.join(demucs_output_path, folder)
+        if os.path.isdir(first_level_folder_path):
+            # Further navigate to the model folder inside the track folder
+            model_folder_path = os.path.join(first_level_folder_path, "htdemucs")
+            if os.path.isdir(model_folder_path):
+                # Locate the 'no_vocals.mp3' file within the model folder
+                instrumental_file = os.path.join(model_folder_path, folder, "no_vocals.mp3")
+                if os.path.exists(instrumental_file):
+                    # Rename and move to 'instrumental' folder with original filename
+                    output_filename = f"{folder}.mp3"
+                    new_path = os.path.join(instrumental_output_path, output_filename)
+                    shutil.move(instrumental_file, new_path)
+                    print(f"Moved and renamed {instrumental_file} to {new_path}")
+                else:
+                    print(f"No instrumental file found in {model_folder_path}/{folder}")
+            else:
+                print(f"Model directory {model_folder_path} does not exist")
+        else:
+            print(f"{first_level_folder_path} is not a directory")
+
+
+
+# Process the dataset
+def process_dataset(raw_audio_path, demucs_output_path, instrumental_output_path, split_output_path):
+    # Perform Demucs vocal separation using the command-line interface
+    for file in os.listdir(raw_audio_path):
+        if file.endswith((".mp3", ".wav", ".flac")):
+            input_file = os.path.join(raw_audio_path, file)
+            output_folder = os.path.splitext(file)[0]
+            cmd = [
+                "demucs",
+                "-n", "htdemucs",
+                "--two-stems=vocals",
+                "--mp3",
+                "--mp3-bitrate", "320",
+                "--segment", "4",
+                "--out", os.path.join(demucs_output_path, output_folder),
+                input_file
+            ]
+            os.system(" ".join(cmd))
     
-    # Perform slicing and resampling
-    slice_and_resample_audio(demucs_output_path, split_output_path)
+    # Process Demucs output and move instrumental MP3s to a single folder
+    process_demucs_output(demucs_output_path, instrumental_output_path)
+    
+    # Perform slicing and resampling on the instrumental MP3s
+    slice_and_resample_audio(instrumental_output_path, split_output_path)
 
 # Example usage
 raw_audio_path = "./dataset/gary"
-demucs_output_path = "./dataset/gary/demucs"
+demucs_output_path = "./dataset/gary/demucs/htdemucs"
+instrumental_output_path = "./dataset/gary/instrumental"
 split_output_path = "./dataset/gary/split"
-process_dataset(raw_audio_path, demucs_output_path, split_output_path)
+process_dataset(raw_audio_path, demucs_output_path, instrumental_output_path, split_output_path)
 
 
 # @title metadata (labels) for essentia - LONG CELL DONT OPEN
@@ -718,9 +772,11 @@ with open(os.path.join(output_dataset_path, "train.jsonl"), "w") as train_file, 
         else:
             eval_file.write(json.dumps(entry) + '\n')
 
-# Clear CUDA memory for fine-tuning
-device = cuda.get_current_device()
-device.reset()
+if cuda.is_available():
+    device = cuda.get_current_device()
+    device.reset()
+else:
+    print("No CUDA devices available. Skipping device reset.")
 
 # Create YAML configuration file
 config_path = os.path.join(output_dataset_path, "train.yaml")
@@ -738,3 +794,14 @@ datasource:
 """
 with open(config_path, 'w') as yaml_file:
     yaml_file.write(yaml_contents)
+
+def cleanup_directory(directory_path):
+    try:
+        shutil.rmtree(directory_path)
+        print(f"Successfully cleaned up {directory_path}")
+    except Exception as e:
+        print(f"Error cleaning up directory {directory_path}: {e}")
+
+# After all processing is done and you're ready to clean up
+cleanup_directory_path = "./dataset/gary/demucs"
+cleanup_directory(cleanup_directory_path)
