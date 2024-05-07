@@ -94,19 +94,29 @@ def separate(inp, outp):
         print("Command failed, something went wrong.")
 
 # Function to slice and resample audio files
-def slice_and_resample_audio(dataset_path, output_dir):
+def slice_and_resample_audio(dataset_path, output_dir, chunk_length=30000):
     print(f"Slicing and resampling audio in {dataset_path}...")
     os.makedirs(output_dir, exist_ok=True)
+    
     for filename in os.listdir(dataset_path):
         if filename.endswith(".mp3"):
             audio_path = os.path.join(dataset_path, filename)
             if os.path.exists(audio_path):
                 audio = AudioSegment.from_file(audio_path)
                 audio = audio.set_frame_rate(44100)
-                for i in range(0, len(audio), 30000):
-                    chunk = audio[i:i+30000]
+                duration = len(audio)
+                
+                # Iterate over the audio file in chunk_length increments
+                for i in range(0, duration - chunk_length, chunk_length):
+                    chunk = audio[i:i + chunk_length]
                     chunk_filename = f"{os.path.splitext(filename)[0]}_chunk{i//1000}.wav"
                     chunk.export(os.path.join(output_dir, chunk_filename), format="wav")
+                
+                # Always take the last chunk from the end of the file to ensure it's full length
+                last_chunk = audio[-chunk_length:]
+                chunk_filename = f"{os.path.splitext(filename)[0]}_chunk{(duration - chunk_length)//1000}.wav"
+                last_chunk.export(os.path.join(output_dir, chunk_filename), format="wav")
+
                 print(f"Processed {filename}")
             else:
                 print(f"File {audio_path} not found")
@@ -745,7 +755,7 @@ with open(os.path.join(output_dataset_path, "train.jsonl"), "w") as train_file, 
             result = {"genres": [], "moods": [], "instruments": []}
         y, sr = librosa.load(os.path.join(split_dataset_path, filename))
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-        tempo = round(tempo)
+        tempo = round(tempo[0]) if isinstance(tempo, np.ndarray) else round(tempo)
         chroma = librosa.feature.chroma_stft(y=y, sr=sr)
         key = np.argmax(np.sum(chroma, axis=1))
         key = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'][key]
